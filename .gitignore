@@ -1,0 +1,50 @@
+# macOS/editor noise
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Local docs/notes are working notes for this lab.
+docs/
+notes/
+
+# C/C++ build outputs
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# Linux kernel module outputs
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.order
+*.symvers
+Module.symvers
+modules.order
+
+# CMake/build directories
+build/
+cmake-build-*/
+out/
+artifacts/
+CMakeUserPresets.json
+compile_commands.json
+
+# Kernel build scratch files
+kernel/.tmp_versions/
+kernel/.*.cmd
+kernel/*.cmd
+kernel/*.ko
+kernel/*.mod
+kernel/*.mod.c
+kernel/*.mod.o
+kernel/*.o
+kernel/Module.symvers
+kernel/modules.order
+
+# Vagrant/local runtime files
+.vagrant/
+*.log

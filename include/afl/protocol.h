@@ -1,0 +1,144 @@
+#ifndef AFL_PROTOCOL_H
+#define AFL_PROTOCOL_H
+
+#ifdef __KERNEL__
+#include <linux/types.h>
+typedef __u32 afl_ioctl_u32_t;
+typedef __u64 afl_ioctl_u64_t;
+#else
+#include <stdint.h>
+typedef uint32_t afl_ioctl_u32_t;
+typedef uint64_t afl_ioctl_u64_t;
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define AFL_IOCTL_DEVICE_ID 0xA5F10001u
+#define AFL_IOCTL_VENDOR_ID 0xA5A5u
+#define AFL_IOCTL_ABI_VERSION_MAJOR 0u
+#define AFL_IOCTL_ABI_VERSION_MINOR 1u
+#define AFL_IOCTL_FW_VERSION_MAJOR 0u
+#define AFL_IOCTL_FW_VERSION_MINOR 1u
+#define AFL_IOCTL_FW_VERSION_PATCH 0u
+#define AFL_IOCTL_MAX_TRANSFER_BYTES (1u << 20)
+#define AFL_IOCTL_TRACE_ENTRY_COUNT 64u
+
+#define AFL_IOCTL_PACK_VERSION(major, minor, patch) \
+    ((((afl_ioctl_u32_t)(major) & 0xffu) << 24) | (((afl_ioctl_u32_t)(minor) & 0xffu) << 16) | ((afl_ioctl_u32_t)(patch) & 0xffffu))
+
+enum afl_ioctl_register_offset {
+    AFL_IOCTL_REG_DEVICE_ID = 0,
+    AFL_IOCTL_REG_VENDOR_ID = 1,
+    AFL_IOCTL_REG_ABI_VERSION = 2,
+    AFL_IOCTL_REG_FW_VERSION = 3,
+    AFL_IOCTL_REG_DEVICE_STATUS = 4,
+    AFL_IOCTL_REG_ERROR_CODE = 5,
+    AFL_IOCTL_REG_DOORBELL = 6,
+    AFL_IOCTL_REG_IRQ_STATUS = 7,
+    AFL_IOCTL_REG_COMMAND_QUEUE_HEAD = 8,
+    AFL_IOCTL_REG_COMMAND_QUEUE_TAIL = 9,
+    AFL_IOCTL_REG_COMPLETION_QUEUE_HEAD = 10,
+    AFL_IOCTL_REG_COMPLETION_QUEUE_TAIL = 11,
+    AFL_IOCTL_REG_COMMAND_COUNT_LO = 12,
+    AFL_IOCTL_REG_RESET_COUNT_LO = 13,
+    AFL_IOCTL_REG_TRACE_HEAD = 14,
+    AFL_IOCTL_REG_TRACE_COUNT = 15,
+    AFL_IOCTL_REG_IRQ_VECTOR_STATUS = 16,
+    AFL_IOCTL_REG_IRQ_VECTOR_MASK = 17,
+    AFL_IOCTL_REG_IRQ_VECTOR_ENABLE = 18,
+    AFL_IOCTL_REG_COUNT = 64
+};
+
+enum afl_ioctl_doorbell_bits {
+    AFL_IOCTL_DOORBELL_COMMAND_QUEUE = 1u << 0
+};
+
+enum afl_ioctl_irq_bits {
+    AFL_IOCTL_IRQ_COMPLETION = 1u << 0,
+    AFL_IOCTL_IRQ_ERROR = 1u << 1,
+    AFL_IOCTL_IRQ_RESET_DONE = 1u << 2
+};
+
+enum afl_ioctl_irq_vector {
+    AFL_IOCTL_IRQ_VECTOR_ADMIN = 0,
+    AFL_IOCTL_IRQ_VECTOR_COMPLETION = 1,
+    AFL_IOCTL_IRQ_VECTOR_ERROR = 2,
+    AFL_IOCTL_IRQ_VECTOR_TELEMETRY = 3,
+    AFL_IOCTL_IRQ_NUM_VECTORS = 4
+};
+
+enum afl_ioctl_fw_state {
+    AFL_IOCTL_FW_STATE_RESET = 0,
+    AFL_IOCTL_FW_STATE_BOOTING = 1,
+    AFL_IOCTL_FW_STATE_SELF_TEST = 2,
+    AFL_IOCTL_FW_STATE_READY = 3,
+    AFL_IOCTL_FW_STATE_RUNNING = 4,
+    AFL_IOCTL_FW_STATE_ERROR = 5,
+    AFL_IOCTL_FW_STATE_RECOVERY = 6
+};
+
+enum afl_ioctl_status_bits {
+    AFL_IOCTL_STATUS_READY = 1u << 0,
+    AFL_IOCTL_STATUS_RUNNING = 1u << 1,
+    AFL_IOCTL_STATUS_ERROR = 1u << 2,
+    AFL_IOCTL_STATUS_RECOVERY_ACTIVE = 1u << 3,
+    AFL_IOCTL_STATUS_SELF_TEST_DONE = 1u << 4
+};
+
+enum afl_ioctl_error_code {
+    AFL_IOCTL_ERR_NONE = 0,
+    AFL_IOCTL_ERR_INVALID_OPCODE = 1,
+    AFL_IOCTL_ERR_INVALID_STATE = 2,
+    AFL_IOCTL_ERR_QUEUE_FULL = 3,
+    AFL_IOCTL_ERR_QUEUE_EMPTY = 4,
+    AFL_IOCTL_ERR_TIMEOUT = 5,
+    AFL_IOCTL_ERR_INVALID_MEMORY_RANGE = 6,
+    AFL_IOCTL_ERR_FW_PANIC = 7,
+    AFL_IOCTL_ERR_DEVICE_HANG = 8,
+    AFL_IOCTL_ERR_ECC = 9,
+    AFL_IOCTL_ERR_RECOVERY_FAILED = 10,
+    AFL_IOCTL_ERR_VERSION_MISMATCH = 11
+};
+
+enum afl_ioctl_command_status {
+    AFL_IOCTL_CMD_STATUS_SUCCESS = 0,
+    AFL_IOCTL_CMD_STATUS_FAILED = 1,
+    AFL_IOCTL_CMD_STATUS_REJECTED = 2,
+    AFL_IOCTL_CMD_STATUS_TIMEOUT = 3
+};
+
+enum afl_ioctl_data_type {
+    AFL_IOCTL_DTYPE_U8 = 1,
+    AFL_IOCTL_DTYPE_I32 = 2,
+    AFL_IOCTL_DTYPE_F32 = 3
+};
+
+enum afl_ioctl_fault_kind {
+    AFL_IOCTL_FAULT_INVALID_OPCODE = 1,
+    AFL_IOCTL_FAULT_FW_PANIC = 2,
+    AFL_IOCTL_FAULT_DEVICE_HANG = 3,
+    AFL_IOCTL_FAULT_ECC = 4,
+    AFL_IOCTL_FAULT_RECOVERY_FAILURE = 5
+};
+
+enum afl_ioctl_trace_event {
+    AFL_IOCTL_TRACE_BOOT = 1,
+    AFL_IOCTL_TRACE_COMMAND_QUEUED = 2,
+    AFL_IOCTL_TRACE_DOORBELL = 3,
+    AFL_IOCTL_TRACE_COMMAND_START = 4,
+    AFL_IOCTL_TRACE_COMMAND_COMPLETE = 5,
+    AFL_IOCTL_TRACE_IRQ_RAISE = 6,
+    AFL_IOCTL_TRACE_ERROR = 7,
+    AFL_IOCTL_TRACE_RESET = 8,
+    AFL_IOCTL_TRACE_WATCHDOG_TIMEOUT = 9,
+    AFL_IOCTL_TRACE_RECOVERY_ENTER = 10,
+    AFL_IOCTL_TRACE_RECOVERY_COMPLETE = 11
+};
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
