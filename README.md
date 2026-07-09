@@ -50,9 +50,9 @@ This repository is intended to exercise:
 - [Architecture and Mental Model](#architecture-and-mental-model)
   - [Driver/User Contract](#driveruser-contract)
   - [Kernel Driver Path](#kernel-driver-path)
-  - [Fake DMA Model](#fake-dma-model)
-  - [Fake MMIO Register Map](#fake-mmio-register-map)
-  - [Fake IRQ and Completion Model](#fake-irq-and-completion-model)
+  - [DMA Model](#dma-model)
+  - [MMIO Register Map](#mmio-register-map)
+  - [Interrupt and Completion Model](#interrupt-and-completion-model)
   - [Firmware State Machine](#firmware-state-machine)
   - [Trace, Telemetry, and Recovery](#trace-telemetry-and-recovery)
   - [Virtual Accelerator Model](#virtual-accelerator-model)
@@ -218,7 +218,7 @@ driver pops completion and returns output
 
 The initial async path supports one outstanding vector-add request.
 
-### Fake DMA Model
+### DMA Model
 
 After ioctl validation, the first driver job is to put command data and workload
 buffers somewhere the device side is allowed to read. Real DMA means the device
@@ -257,7 +257,7 @@ After staging, the command descriptor contains addresses into these fake DMA
 buffers. From the virtual device's point of view, it receives a command with
 device-readable addresses rather than raw userspace pointers.
 
-### Fake MMIO Register Map
+### MMIO Register Map
 
 After the fake DMA buffers and command descriptor exist, the driver still needs
 a control signal that tells firmware to consume the queue. That is the MMIO
@@ -294,7 +294,7 @@ offset  name                    meaning
 doorbell register is the key control point: the driver writes it after queuing a
 command, and the virtual firmware consumes the command queue.
 
-### Fake IRQ and Completion Model
+### Interrupt and Completion Model
 
 After the driver rings the doorbell, the device side needs a way to report
 "work completed" or "work failed" without forcing userspace to blindly poll
