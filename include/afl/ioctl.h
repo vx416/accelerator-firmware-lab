@@ -84,6 +84,46 @@ struct afl_ioctl_matrix_mul {
     afl_ioctl_u32_t flags;
 };
 
+struct afl_ioctl_alloc_buffer {
+    afl_ioctl_u32_t size;
+    afl_ioctl_u32_t flags;
+    afl_ioctl_u32_t handle;
+    afl_ioctl_u32_t mmap_offset;
+    afl_ioctl_u32_t allocated_size;
+    afl_ioctl_u32_t reserved;
+};
+
+struct afl_ioctl_free_buffer {
+    afl_ioctl_u32_t handle;
+    afl_ioctl_u32_t reserved;
+};
+
+struct afl_ioctl_vector_add_buffer {
+    afl_ioctl_u32_t a_handle;
+    afl_ioctl_u32_t a_offset;
+    afl_ioctl_u32_t b_handle;
+    afl_ioctl_u32_t b_offset;
+    afl_ioctl_u32_t out_handle;
+    afl_ioctl_u32_t out_offset;
+    afl_ioctl_u32_t element_count;
+    afl_ioctl_u32_t dtype;
+};
+
+struct afl_ioctl_matrix_mul_buffer {
+    afl_ioctl_u32_t a_handle;
+    afl_ioctl_u32_t a_offset;
+    afl_ioctl_u32_t b_handle;
+    afl_ioctl_u32_t b_offset;
+    afl_ioctl_u32_t c_handle;
+    afl_ioctl_u32_t c_offset;
+    afl_ioctl_u32_t m;
+    afl_ioctl_u32_t n;
+    afl_ioctl_u32_t k;
+    afl_ioctl_u32_t dtype;
+    afl_ioctl_u32_t flags;
+    afl_ioctl_u32_t reserved;
+};
+
 struct afl_ioctl_fault {
     afl_ioctl_u32_t fault_kind;
     afl_ioctl_u32_t status;
@@ -126,6 +166,10 @@ struct afl_ioctl_trace {
 #define AFL_IOCTL_GET_COMPLETION _IOR(AFL_IOCTL_MAGIC, 0x0b, struct afl_ioctl_completion)
 #define AFL_IOCTL_GET_TRACE _IOR(AFL_IOCTL_MAGIC, 0x0c, struct afl_ioctl_trace)
 #define AFL_IOCTL_TRIGGER_TIMEOUT _IOR(AFL_IOCTL_MAGIC, 0x0d, struct afl_ioctl_completion)
+#define AFL_IOCTL_ALLOC_BUFFER _IOWR(AFL_IOCTL_MAGIC, 0x10, struct afl_ioctl_alloc_buffer)
+#define AFL_IOCTL_FREE_BUFFER _IOW(AFL_IOCTL_MAGIC, 0x11, struct afl_ioctl_free_buffer)
+#define AFL_IOCTL_VECTOR_ADD_BUFFER _IOW(AFL_IOCTL_MAGIC, 0x12, struct afl_ioctl_vector_add_buffer)
+#define AFL_IOCTL_MATRIX_MUL_BUFFER _IOW(AFL_IOCTL_MAGIC, 0x13, struct afl_ioctl_matrix_mul_buffer)
 
 #ifdef __cplusplus
 }

@@ -1,14 +1,17 @@
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/poll.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
 
 #include "afl/ioctl.h"
+#include "buffer_pool.h"
 #include "driver_dma.h"
 #include "driver_transport.h"
 #include "virtual_device.h"
@@ -17,6 +20,10 @@ static struct afl_kernel_vdev afl_dev;
 static DEFINE_MUTEX(afl_async_lock);
 static DEFINE_MUTEX(afl_trace_snapshot_lock);
 static struct afl_ioctl_trace afl_trace_snapshot;
+
+struct afl_file_ctx {
+    struct afl_buffer_pool_owner buffer_owner;
+};
 
 struct afl_async_vector_add {
     bool pending;
@@ -361,13 +368,153 @@ out_free_a:
     return ret;
 }
 
+static long afl_ioctl_alloc_buffer(struct file *file, unsigned long arg)
+{
+    struct afl_file_ctx *ctx = file->private_data;
+    struct afl_ioctl_alloc_buffer req;
+    int ret;
+
+    if (ctx == NULL)
+        return -ENODEV;
+    if (copy_from_user(&req, (const void __user *)arg, sizeof(req)) != 0)
+        return -EFAULT;
+
+    ret = afl_buffer_pool_alloc(ctx, &ctx->buffer_owner, req.size, &req.handle, &req.mmap_offset, &req.allocated_size);
+    if (ret != 0)
+        return ret;
+    req.reserved = 0;
+
+    if (copy_to_user((void __user *)arg, &req, sizeof(req)) != 0) {
+        struct afl_ioctl_free_buffer cleanup;
+
+        cleanup.handle = req.handle;
+        cleanup.reserved = 0;
+        afl_buffer_pool_free(ctx, &ctx->buffer_owner, cleanup.handle);
+        return -EFAULT;
+    }
+    return 0;
+}
+
+static long afl_ioctl_free_buffer(struct file *file, unsigned long arg)
+{
+    struct afl_file_ctx *ctx = file->private_data;
+    struct afl_ioctl_free_buffer req;
+
+    if (ctx == NULL)
+        return -ENODEV;
+    if (copy_from_user(&req, (const void __user *)arg, sizeof(req)) != 0)
+        return -EFAULT;
+
+    return afl_buffer_pool_free(ctx, &ctx->buffer_owner, req.handle);
+}
+
+static long afl_ioctl_vector_add_buffer(struct file *file, unsigned long arg)
+{
+    struct afl_file_ctx *ctx = file->private_data;
+    struct afl_ioctl_vector_add_buffer req;
+    struct afl_ioctl_vector_add shape;
+    struct afl_kvdev_command command;
+    struct afl_kvdev_completion completion;
+    size_t bytes;
+    long ret;
+
+    if (ctx == NULL)
+        return -ENODEV;
+
+    memset(&req, 0, sizeof(req));
+    memset(&shape, 0, sizeof(shape));
+    memset(&command, 0, sizeof(command));
+    memset(&completion, 0, sizeof(completion));
+
+    if (copy_from_user(&req, (const void __user *)arg, sizeof(req)) != 0)
+        return -EFAULT;
+
+    shape.element_count = req.element_count;
+    shape.dtype = req.dtype;
+    ret = afl_driver_vector_bytes(&shape, &bytes);
+    if (ret != 0)
+        return ret;
+
+    command.opcode = AFL_KVDEV_OP_VECTOR_ADD;
+    ret = afl_buffer_pool_lookup_dma(ctx, req.a_handle, req.a_offset, bytes, &command.payload.vector_add.a_dma_addr);
+    if (ret != 0)
+        return ret;
+    ret = afl_buffer_pool_lookup_dma(ctx, req.b_handle, req.b_offset, bytes, &command.payload.vector_add.b_dma_addr);
+    if (ret != 0)
+        return ret;
+    ret = afl_buffer_pool_lookup_dma(ctx, req.out_handle, req.out_offset, bytes, &command.payload.vector_add.out_dma_addr);
+    if (ret != 0)
+        return ret;
+    command.payload.vector_add.element_count = req.element_count;
+    command.payload.vector_add.dtype = req.dtype;
+
+    ret = afl_driver_transport_submit_and_wait(&afl_dev, &command, &completion);
+    if (ret == 0)
+        ret = completion.result;
+    return ret;
+}
+
+static long afl_ioctl_matrix_mul_buffer(struct file *file, unsigned long arg)
+{
+    struct afl_file_ctx *ctx = file->private_data;
+    struct afl_ioctl_matrix_mul_buffer req;
+    struct afl_kvdev_command command;
+    struct afl_kvdev_completion completion;
+    size_t a_bytes;
+    size_t b_bytes;
+    size_t c_bytes;
+    long ret;
+
+    if (ctx == NULL)
+        return -ENODEV;
+
+    memset(&req, 0, sizeof(req));
+    memset(&command, 0, sizeof(command));
+    memset(&completion, 0, sizeof(completion));
+
+    if (copy_from_user(&req, (const void __user *)arg, sizeof(req)) != 0)
+        return -EFAULT;
+    if (req.dtype != AFL_IOCTL_DTYPE_I32)
+        return -EINVAL;
+
+    ret = afl_driver_matrix_bytes(req.m, req.k, &a_bytes);
+    if (ret != 0)
+        return ret;
+    ret = afl_driver_matrix_bytes(req.k, req.n, &b_bytes);
+    if (ret != 0)
+        return ret;
+    ret = afl_driver_matrix_bytes(req.m, req.n, &c_bytes);
+    if (ret != 0)
+        return ret;
+
+    command.opcode = AFL_KVDEV_OP_MATRIX_MUL;
+    ret = afl_buffer_pool_lookup_dma(ctx, req.a_handle, req.a_offset, a_bytes, &command.payload.matrix_mul.a_dma_addr);
+    if (ret != 0)
+        return ret;
+    ret = afl_buffer_pool_lookup_dma(ctx, req.b_handle, req.b_offset, b_bytes, &command.payload.matrix_mul.b_dma_addr);
+    if (ret != 0)
+        return ret;
+    ret = afl_buffer_pool_lookup_dma(ctx, req.c_handle, req.c_offset, c_bytes, &command.payload.matrix_mul.c_dma_addr);
+    if (ret != 0)
+        return ret;
+    command.payload.matrix_mul.m = req.m;
+    command.payload.matrix_mul.n = req.n;
+    command.payload.matrix_mul.k = req.k;
+    command.payload.matrix_mul.dtype = req.dtype;
+    command.payload.matrix_mul.flags = req.flags;
+
+    ret = afl_driver_transport_submit_and_wait(&afl_dev, &command, &completion);
+    if (ret == 0)
+        ret = completion.result;
+    return ret;
+}
+
 static long afl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     struct afl_kvdev_command command;
     struct afl_kvdev_completion completion;
     long ret = 0;
 
-    (void)file;
     memset(&command, 0, sizeof(command));
     memset(&completion, 0, sizeof(completion));
 
@@ -419,6 +566,18 @@ static long afl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     case AFL_IOCTL_MATRIX_MUL:
         ret = afl_ioctl_matrix_mul(arg);
         break;
+    case AFL_IOCTL_ALLOC_BUFFER:
+        ret = afl_ioctl_alloc_buffer(file, arg);
+        break;
+    case AFL_IOCTL_FREE_BUFFER:
+        ret = afl_ioctl_free_buffer(file, arg);
+        break;
+    case AFL_IOCTL_VECTOR_ADD_BUFFER:
+        ret = afl_ioctl_vector_add_buffer(file, arg);
+        break;
+    case AFL_IOCTL_MATRIX_MUL_BUFFER:
+        ret = afl_ioctl_matrix_mul_buffer(file, arg);
+        break;
     case AFL_IOCTL_TRIGGER_FAULT:
         command.opcode = AFL_KVDEV_OP_TRIGGER_FAULT;
         if (copy_from_user(&command.payload.fault, (const void __user *)arg, sizeof(command.payload.fault)) != 0) {
@@ -454,15 +613,27 @@ static long afl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 static int afl_open(struct inode *inode, struct file *file)
 {
+    struct afl_file_ctx *ctx;
+
     (void)inode;
-    (void)file;
+    ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+    if (ctx == NULL)
+        return -ENOMEM;
+
+    file->private_data = ctx;
     return 0;
 }
 
 static int afl_release(struct inode *inode, struct file *file)
 {
+    struct afl_file_ctx *ctx = file->private_data;
+
     (void)inode;
-    (void)file;
+    if (ctx != NULL) {
+        afl_buffer_pool_free_owner(ctx, &ctx->buffer_owner);
+        kfree(ctx);
+        file->private_data = NULL;
+    }
     return 0;
 }
 
@@ -473,10 +644,19 @@ static __poll_t afl_poll(struct file *file, poll_table *wait)
     return afl_driver_transport_poll_mask(&afl_dev);
 }
 
+static int afl_mmap(struct file *file, struct vm_area_struct *vma)
+{
+    unsigned long size = vma->vm_end - vma->vm_start;
+    unsigned long byte_offset = vma->vm_pgoff << PAGE_SHIFT;
+
+    return afl_buffer_pool_mmap(file->private_data, vma, byte_offset, size);
+}
+
 static const struct file_operations afl_fops = {
     .owner = THIS_MODULE,
     .open = afl_open,
     .release = afl_release,
+    .mmap = afl_mmap,
     .poll = afl_poll,
     .unlocked_ioctl = afl_ioctl,
 #ifdef CONFIG_COMPAT
@@ -496,10 +676,15 @@ static int __init afl_kernel_init(void)
     int ret;
 
     afl_kvdev_init(&afl_dev);
-
-    ret = misc_register(&afl_miscdev);
+    ret = afl_buffer_pool_init();
     if (ret != 0)
         return ret;
+
+    ret = misc_register(&afl_miscdev);
+    if (ret != 0) {
+        afl_buffer_pool_destroy();
+        return ret;
+    }
 
     pr_info("afl_kernel: registered /dev/%s\n", afl_miscdev.name);
     return 0;
@@ -508,6 +693,7 @@ static int __init afl_kernel_init(void)
 static void __exit afl_kernel_exit(void)
 {
     misc_deregister(&afl_miscdev);
+    afl_buffer_pool_destroy();
     pr_info("afl_kernel: unregistered /dev/%s\n", afl_miscdev.name);
 }
 

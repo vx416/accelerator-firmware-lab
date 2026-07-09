@@ -1,5 +1,5 @@
 obj-m += afl_kernel.o
-afl_kernel-y := driver.o driver_transport.o driver_dma.o fake_dma_aperture.o \
+afl_kernel-y := driver.o driver_transport.o driver_dma.o fake_dma_aperture.o buffer_pool.o \
 	virtual_device.o virtual_device_regs.o virtual_device_trace.o \
 	virtual_device_irq.o virtual_device_workloads.o virtual_device_fw.o \
 	virtual_device_queues.o

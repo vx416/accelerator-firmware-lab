@@ -44,7 +44,7 @@ int afl_fake_dma_register(void *cpu_addr, afl_ioctl_u64_t dma_addr, size_t bytes
     unsigned int i;
     int free_index = -1;
 
-    if (cpu_addr == NULL || dma_addr == 0 || bytes == 0 || bytes > AFL_IOCTL_MAX_TRANSFER_BYTES)
+    if (cpu_addr == NULL || dma_addr == 0 || bytes == 0)
         return -EINVAL;
 
     mutex_lock(&afl_fake_dma_lock);
