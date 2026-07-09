@@ -4,8 +4,7 @@
 *.swo
 *~
 
-# Local docs/notes are working notes for this lab.
-docs/
+# Local notes are working notes for this lab.
 notes/
 
 # C/C++ build outputs

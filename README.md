@@ -600,6 +600,10 @@ The smoke test builds `fwctl` and `afl-kernel-verifier`, builds and loads
 `afl_kernel.ko`, runs supported `fwctl` commands, runs the C verifier against
 `/dev/afl0`, then unloads the module.
 
+Example successful smoke-test and verifier run:
+
+![Kernel smoke test and verifier passing](docs/assets/kernel-smoke-test-pass.png)
+
 The C verifier checks behavior that is easy to miss in a demo-only workflow:
 
 ```text
