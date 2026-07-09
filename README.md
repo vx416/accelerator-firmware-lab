@@ -684,12 +684,16 @@ The C verifier checks behavior that is easy to miss in a demo-only workflow:
 ```text
 invalid userspace pointer rejection
 oversized fake DMA request rejection
+buffer-handle vector add and matrix multiply
+buffer quota enforcement and invalid-handle rejection
+buffer release, fd-release cleanup, and concurrent allocation isolation
 async completion through poll()
 async backpressure for the single outstanding request slot
 empty completion queue reporting
 watchdog timeout and recovery to READY
 timeout/recovery telemetry counter updates
 fault injection followed by reset recovery
+fake IRQ vector reporting
 trace event order: queued -> doorbell -> command start -> command complete
 ```
 
@@ -706,9 +710,13 @@ make verifier
 ./build/fwctl selftest
 ./build/fwctl run-vector-add
 ./build/fwctl run-vector-add 5,6,7 50,60,70
+./build/fwctl run-vector-add-buffer
+./build/fwctl run-vector-add-buffer 4,8,12 40,80,120
 ./build/fwctl run-vector-add-async 2,4,6 20,40,60
 ./build/fwctl run-matrix-mul
 ./build/fwctl run-matrix-mul 2 2 3 1,2,3,4,5,6 7,8,9,10,11,12
+./build/fwctl run-matrix-mul-buffer
+./build/fwctl run-matrix-mul-buffer 2 2 3 1,2,3,4,5,6 7,8,9,10,11,12
 ./build/fwctl memcopy
 ./build/fwctl telemetry
 ./build/fwctl trigger-fault
