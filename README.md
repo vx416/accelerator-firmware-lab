@@ -546,20 +546,30 @@ include/afl/ioctl.h
 
 kernel/
   driver.c
-    /dev/afl0 misc device, file_operations, ioctl handling.
+    /dev/afl0 misc device, file_operations, ioctl dispatch, poll, mmap entry,
+    and per-open file context.
 
-  driver_dma.c
-    Driver-owned fake DMA staging buffers and userspace copy boundaries.
+  driver_dma.c / driver_dma.h
+    Driver-owned fake DMA staging buffers and userspace copy boundaries for
+    copy-based ioctls.
 
-  buffer_pool.c
+  buffer_pool.c / buffer_pool.h
     Explicit mmap-able buffer allocation, handle ownership, free-list
     allocation, coalescing, quota enforcement, and fd-release cleanup.
 
-  driver_transport.c
+  fake_dma_aperture.c / fake_dma_aperture.h
+    Fake DMA aperture registry. The virtual device validates that every fake
+    DMA address belongs to a driver-approved range before reading or writing.
+
+  driver_transport.c / driver_transport.h
     Command submit, fake MMIO doorbell write, fake IRQ wait, completion pop.
 
-  virtual_device.c
+  virtual_device.c / virtual_device.h
     Public kernel virtual-device entry points.
+
+  virtual_device_internal.h
+    Internal virtual-device state and private helper declarations shared by the
+    split virtual-device implementation files.
 
   virtual_device_regs.c
     Fake MMIO register access and status snapshot generation.
