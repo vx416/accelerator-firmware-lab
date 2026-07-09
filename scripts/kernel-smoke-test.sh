@@ -12,11 +12,15 @@ trap '"${repo_root}/scripts/unload-kernel-module.sh"' EXIT
 "${fwctl}" version
 "${fwctl}" selftest
 "${fwctl}" run-vector-add
+"${fwctl}" run-vector-add-buffer
 "${fwctl}" run-vector-add 1,1 1,1
 "${fwctl}" run-vector-add 5,6,7 50,60,70
+"${fwctl}" run-vector-add-buffer 4,8,12 40,80,120
 "${fwctl}" run-vector-add-async 2,4,6 20,40,60
 "${fwctl}" run-matrix-mul
 "${fwctl}" run-matrix-mul 2 2 3 1,2,3,4,5,6 7,8,9,10,11,12
+"${fwctl}" run-matrix-mul-buffer
+"${fwctl}" run-matrix-mul-buffer 2 2 3 1,2,3,4,5,6 7,8,9,10,11,12
 "${fwctl}" memcopy
 "${fwctl}" telemetry
 "${fwctl}" trigger-fault

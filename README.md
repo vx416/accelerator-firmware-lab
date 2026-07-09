@@ -223,8 +223,13 @@ The initial async path supports one outstanding vector-add request.
 After ioctl validation, the first driver job is to put command data and workload
 buffers somewhere the device side is allowed to read. Real DMA means the device
 reads and writes host memory directly after the driver maps approved buffers for
-the device. **This project does not perform real hardware DMA. It models the
-ownership boundary with driver-owned staging buffers:**
+the device. **This project does not perform real hardware DMA.** It models that
+ownership boundary with two paths:
+
+1. copy-based staging buffers;
+2. explicit buffer allocation with handles.
+
+The copy-based path is the simplest:
 
 ```text
 userspace pointer
@@ -246,16 +251,34 @@ driver-owned kernel buffer
 userspace pointer
 ```
 
+The explicit buffer path is closer to a real accelerator memory manager.
+Userspace asks the driver for buffer objects, maps each returned mmap offset,
+and submits workload descriptors using buffer handles:
+
+```text
+ioctl(ALLOC_BUFFER)
+  -> handle + mmap_offset
+
+mmap(fd, mmap_offset)
+  -> userspace pointer for that buffer
+
+ioctl(VECTOR_ADD_BUFFER / MATRIX_MUL_BUFFER)
+  -> handle + offset + shape
+
+ioctl(FREE_BUFFER)
+```
+
 This keeps the boundary explicit:
 
 - userspace never directly mutates virtual-device state;
 - driver code owns userspace copies and staging;
-- the virtual device sees only fake DMA addresses;
+- the driver validates mmap offsets and buffer handle ownership;
+- the virtual device sees only fake DMA addresses from approved ranges;
 - workload execution uses fixed internal scratch memory.
 
-After staging, the command descriptor contains addresses into these fake DMA
-buffers. From the virtual device's point of view, it receives a command with
-device-readable addresses rather than raw userspace pointers.
+After staging or buffer-handle validation, the command descriptor contains fake
+DMA addresses. From the virtual device's point of view, it receives a command
+with device-readable addresses rather than raw userspace pointers.
 
 ### MMIO Register Map
 
@@ -439,6 +462,41 @@ device model, not a userspace simulator. Its state is held in
 - fixed scratch memory;
 - fake cycle counter.
 
+The driver side also owns the memory model that feeds the virtual accelerator.
+The mmap-backed mechanism is an explicit buffer pool:
+
+- **explicit buffer pool:** a 16 MiB pool used by `ALLOC_BUFFER`,
+  `FREE_BUFFER`, `VECTOR_ADD_BUFFER`, and `MATRIX_MUL_BUFFER`.
+
+The explicit buffer pool uses a fixed-array free-list allocator:
+
+```text
+free range table:
+  offset -> size
+
+allocated buffer table:
+  handle -> owner fd, offset, size
+```
+
+Allocation is first-fit. The selected free range is split, and the driver
+returns a buffer handle plus an mmap offset. Freeing a buffer inserts the range
+back into the free table and coalesces adjacent ranges. Each open file gets its
+own ownership context through `file->private_data`, with a 4 MiB per-fd quota
+and a 1 MiB maximum single-buffer size. When a process closes the fd or exits,
+the driver's `.release` path frees any buffers owned by that fd, so userspace
+does not have to reclaim perfectly for memory to return to the pool.
+
+Before a handle-based workload runs, the driver validates:
+
+- the handle exists;
+- the handle belongs to the submitting fd;
+- `offset + bytes` fits inside that buffer;
+- the resulting fake DMA address points into the registered buffer pool.
+
+This avoids the race-prone behavior of multiple processes writing through shared
+global offsets. Multiple processes can allocate different buffers from the same
+pool and submit work concurrently without sharing the same mapped range.
+
 It also contains a small workload engine used to exercise the driver path:
 
 - `MEMCOPY`: copies bytes from one fake DMA buffer to another.
@@ -457,7 +515,8 @@ module:
 
 ```text
 driver layer:
-  /dev/afl0, ioctl, userspace copies, fake DMA staging
+  /dev/afl0, ioctl, mmap, userspace copies, fake DMA staging,
+  buffer allocation, buffer ownership validation
 
 virtual device layer:
   registers, queues, firmware state, opcode execution, trace, completion
@@ -468,9 +527,11 @@ side can later replace fake MMIO/DMA/IRQ calls with BAR access, DMA API calls,
 and MSI-X handlers, while preserving most of the contract and debug model.
 
 The implemented user-facing surface includes version, status, telemetry, reset,
-self-test, workload, trace, fault, timeout, async submit, and completion ioctls.
-The C verifier exercises negative paths, async completion, recovery, telemetry,
-and trace ordering against `/dev/afl0`.
+self-test, copy-based workload, buffer-handle mmap workload, trace, fault,
+timeout, async submit, and completion ioctls. The C verifier exercises negative
+paths, buffer bounds checks, buffer quota enforcement, buffer reuse after free,
+fd-release cleanup, concurrent buffer commands, async completion, recovery,
+interrupt vectors, telemetry, and trace ordering against `/dev/afl0`.
 
 ### Repository Layout
 
@@ -489,6 +550,10 @@ kernel/
 
   driver_dma.c
     Driver-owned fake DMA staging buffers and userspace copy boundaries.
+
+  buffer_pool.c
+    Explicit mmap-able buffer allocation, handle ownership, free-list
+    allocation, coalescing, quota enforcement, and fd-release cleanup.
 
   driver_transport.c
     Command submit, fake MMIO doorbell write, fake IRQ wait, completion pop.

@@ -3,8 +3,11 @@
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "afl/ioctl.h"
@@ -79,6 +82,381 @@ static int test_oversized_dma(int fd)
     req.length = AFL_IOCTL_MAX_TRANSFER_BYTES + 1u;
 
     return expect_ioctl_errno(fd, AFL_IOCTL_MEMCOPY, &req, EINVAL, "oversized DMA request is rejected");
+}
+
+static int alloc_buffer(int fd, uint32_t size, struct afl_ioctl_alloc_buffer *buffer)
+{
+    memset(buffer, 0, sizeof(*buffer));
+    buffer->size = size;
+    return ioctl(fd, AFL_IOCTL_ALLOC_BUFFER, buffer);
+}
+
+static int free_buffer(int fd, uint32_t handle)
+{
+    struct afl_ioctl_free_buffer req;
+
+    memset(&req, 0, sizeof(req));
+    req.handle = handle;
+    return ioctl(fd, AFL_IOCTL_FREE_BUFFER, &req);
+}
+
+static int test_buffer_vector_add(int fd)
+{
+    struct afl_ioctl_alloc_buffer a_buf;
+    struct afl_ioctl_alloc_buffer b_buf;
+    struct afl_ioctl_alloc_buffer out_buf;
+    struct afl_ioctl_vector_add_buffer req;
+    int32_t *a_map;
+    int32_t *b_map;
+    int32_t *out_map;
+    uint32_t bytes = 3u * sizeof(int32_t);
+
+    if (alloc_buffer(fd, bytes, &a_buf) != 0 ||
+        alloc_buffer(fd, bytes, &b_buf) != 0 ||
+        alloc_buffer(fd, bytes, &out_buf) != 0) {
+        fail("buffer allocation for vector-add", strerror(errno));
+        return -1;
+    }
+
+    a_map = mmap(NULL, a_buf.allocated_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, a_buf.mmap_offset);
+    b_map = mmap(NULL, b_buf.allocated_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, b_buf.mmap_offset);
+    out_map = mmap(NULL, out_buf.allocated_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, out_buf.mmap_offset);
+    if (a_map == MAP_FAILED || b_map == MAP_FAILED || out_map == MAP_FAILED) {
+        fail("buffer mmap for vector-add", strerror(errno));
+        return -1;
+    }
+
+    a_map[0] = 4;
+    a_map[1] = 8;
+    a_map[2] = 12;
+    b_map[0] = 40;
+    b_map[1] = 80;
+    b_map[2] = 120;
+    memset(out_map, 0, bytes);
+
+    memset(&req, 0, sizeof(req));
+    req.a_handle = a_buf.handle;
+    req.b_handle = b_buf.handle;
+    req.out_handle = out_buf.handle;
+    req.element_count = 3;
+    req.dtype = AFL_IOCTL_DTYPE_I32;
+    if (ioctl(fd, AFL_IOCTL_VECTOR_ADD_BUFFER, &req) != 0) {
+        fail("buffer vector-add ioctl", strerror(errno));
+        return -1;
+    }
+    if (out_map[0] != 44 || out_map[1] != 88 || out_map[2] != 132) {
+        fail("buffer vector-add result", "vector output mismatch");
+        return -1;
+    }
+
+    munmap(out_map, out_buf.allocated_size);
+    munmap(b_map, b_buf.allocated_size);
+    munmap(a_map, a_buf.allocated_size);
+    free_buffer(fd, out_buf.handle);
+    free_buffer(fd, b_buf.handle);
+    free_buffer(fd, a_buf.handle);
+    pass("buffer vector-add result");
+    return 0;
+}
+
+static int test_buffer_matrix_mul(int fd)
+{
+    struct afl_ioctl_alloc_buffer a_buf;
+    struct afl_ioctl_alloc_buffer b_buf;
+    struct afl_ioctl_alloc_buffer c_buf;
+    struct afl_ioctl_matrix_mul_buffer req;
+    int32_t *a_map;
+    int32_t *b_map;
+    int32_t *c_map;
+    int32_t expected[] = {58, 64, 139, 154};
+
+    if (alloc_buffer(fd, 6u * sizeof(int32_t), &a_buf) != 0 ||
+        alloc_buffer(fd, 6u * sizeof(int32_t), &b_buf) != 0 ||
+        alloc_buffer(fd, sizeof(expected), &c_buf) != 0) {
+        fail("buffer allocation for matrix-mul", strerror(errno));
+        return -1;
+    }
+
+    a_map = mmap(NULL, a_buf.allocated_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, a_buf.mmap_offset);
+    b_map = mmap(NULL, b_buf.allocated_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, b_buf.mmap_offset);
+    c_map = mmap(NULL, c_buf.allocated_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, c_buf.mmap_offset);
+    if (a_map == MAP_FAILED || b_map == MAP_FAILED || c_map == MAP_FAILED) {
+        fail("buffer mmap for matrix-mul", strerror(errno));
+        return -1;
+    }
+
+    memcpy(a_map, (int32_t[]){1, 2, 3, 4, 5, 6}, 6u * sizeof(int32_t));
+    memcpy(b_map, (int32_t[]){7, 8, 9, 10, 11, 12}, 6u * sizeof(int32_t));
+    memset(c_map, 0, sizeof(expected));
+
+    memset(&req, 0, sizeof(req));
+    req.a_handle = a_buf.handle;
+    req.b_handle = b_buf.handle;
+    req.c_handle = c_buf.handle;
+    req.m = 2;
+    req.n = 2;
+    req.k = 3;
+    req.dtype = AFL_IOCTL_DTYPE_I32;
+    if (ioctl(fd, AFL_IOCTL_MATRIX_MUL_BUFFER, &req) != 0) {
+        fail("buffer matrix-mul ioctl", strerror(errno));
+        return -1;
+    }
+    if (memcmp(c_map, expected, sizeof(expected)) != 0) {
+        fail("buffer matrix-mul result", "matrix output mismatch");
+        return -1;
+    }
+
+    munmap(c_map, c_buf.allocated_size);
+    munmap(b_map, b_buf.allocated_size);
+    munmap(a_map, a_buf.allocated_size);
+    free_buffer(fd, c_buf.handle);
+    free_buffer(fd, b_buf.handle);
+    free_buffer(fd, a_buf.handle);
+    pass("buffer matrix-mul result");
+    return 0;
+}
+
+static int test_buffer_allocator_limits(int fd)
+{
+    struct afl_ioctl_alloc_buffer bufs[5];
+    struct afl_ioctl_alloc_buffer replacement;
+    struct afl_ioctl_vector_add_buffer invalid;
+    uint32_t i;
+
+    memset(bufs, 0, sizeof(bufs));
+    for (i = 0; i < 4; ++i) {
+        if (alloc_buffer(fd, AFL_IOCTL_BUFFER_MAX_BYTES, &bufs[i]) != 0) {
+            fail("buffer quota fixture allocations", strerror(errno));
+            return -1;
+        }
+    }
+    if (alloc_buffer(fd, AFL_IOCTL_BUFFER_MAX_BYTES, &bufs[4]) == 0) {
+        fail("per-fd buffer quota is enforced", "fifth 1MB allocation unexpectedly succeeded");
+        return -1;
+    }
+    if (errno != EDQUOT) {
+        fail("per-fd buffer quota is enforced", strerror(errno));
+        return -1;
+    }
+    pass("per-fd buffer quota is enforced");
+
+    if (free_buffer(fd, bufs[1].handle) != 0) {
+        fail("buffer free releases quota fixture", strerror(errno));
+        return -1;
+    }
+    if (alloc_buffer(fd, AFL_IOCTL_BUFFER_MAX_BYTES, &replacement) != 0) {
+        fail("buffer free releases quota", strerror(errno));
+        return -1;
+    }
+    pass("buffer free releases quota");
+
+    memset(&invalid, 0, sizeof(invalid));
+    invalid.a_handle = 0x00ffffffu;
+    invalid.b_handle = replacement.handle;
+    invalid.out_handle = bufs[0].handle;
+    invalid.element_count = 1;
+    invalid.dtype = AFL_IOCTL_DTYPE_I32;
+    expect_ioctl_errno(fd, AFL_IOCTL_VECTOR_ADD_BUFFER, &invalid, ENOENT, "invalid buffer handle is rejected");
+
+    free_buffer(fd, replacement.handle);
+    free_buffer(fd, bufs[3].handle);
+    free_buffer(fd, bufs[2].handle);
+    free_buffer(fd, bufs[0].handle);
+    return 0;
+}
+
+static int test_buffer_allocations_do_not_overlap_across_fds(void)
+{
+    int fd_a;
+    int fd_b;
+    struct afl_ioctl_alloc_buffer a;
+    struct afl_ioctl_alloc_buffer b;
+
+    fd_a = open("/dev/afl0", O_RDWR);
+    fd_b = open("/dev/afl0", O_RDWR);
+    if (fd_a < 0 || fd_b < 0) {
+        fail("buffer overlap fixture opens", strerror(errno));
+        if (fd_a >= 0)
+            close(fd_a);
+        if (fd_b >= 0)
+            close(fd_b);
+        return -1;
+    }
+
+    if (alloc_buffer(fd_a, AFL_IOCTL_BUFFER_MAX_BYTES, &a) != 0 ||
+        alloc_buffer(fd_b, AFL_IOCTL_BUFFER_MAX_BYTES, &b) != 0) {
+        fail("buffer overlap fixture allocations", strerror(errno));
+        close(fd_b);
+        close(fd_a);
+        return -1;
+    }
+
+    if (a.mmap_offset == b.mmap_offset) {
+        fail("buffer allocations across fds do not overlap", "two live buffers received the same mmap offset");
+        close(fd_b);
+        close(fd_a);
+        return -1;
+    }
+
+    close(fd_b);
+    close(fd_a);
+    pass("buffer allocations across fds do not overlap");
+    return 0;
+}
+
+static int test_buffer_release_reclaims_unfreed_buffers(void)
+{
+    int fds[4];
+    int fd_replacement;
+    struct afl_ioctl_alloc_buffer buffers[4][4];
+    struct afl_ioctl_alloc_buffer replacement[4];
+    int i;
+    int j;
+
+    memset(fds, -1, sizeof(fds));
+    memset(buffers, 0, sizeof(buffers));
+    memset(replacement, 0, sizeof(replacement));
+
+    for (i = 0; i < 4; ++i) {
+        fds[i] = open("/dev/afl0", O_RDWR);
+        if (fds[i] < 0) {
+            fail("release reclaim fixture opens", strerror(errno));
+            while (i >= 0) {
+                if (fds[i] >= 0)
+                    close(fds[i]);
+                --i;
+            }
+            return -1;
+        }
+        for (j = 0; j < 4; ++j) {
+            if (alloc_buffer(fds[i], AFL_IOCTL_BUFFER_MAX_BYTES, &buffers[i][j]) != 0) {
+                fail("release reclaim fixture allocations", strerror(errno));
+                while (i >= 0) {
+                    if (fds[i] >= 0)
+                        close(fds[i]);
+                    --i;
+                }
+                return -1;
+            }
+        }
+    }
+
+    close(fds[0]);
+    fds[0] = -1;
+
+    fd_replacement = open("/dev/afl0", O_RDWR);
+    if (fd_replacement < 0) {
+        fail("release reclaim replacement open", strerror(errno));
+        goto out_close;
+    }
+    for (j = 0; j < 4; ++j) {
+        if (alloc_buffer(fd_replacement, AFL_IOCTL_BUFFER_MAX_BYTES, &replacement[j]) != 0) {
+            fail("release reclaims unfreed buffers", strerror(errno));
+            close(fd_replacement);
+            goto out_close;
+        }
+    }
+
+    close(fd_replacement);
+    pass("release reclaims unfreed buffers");
+
+out_close:
+    for (i = 0; i < 4; ++i) {
+        if (fds[i] >= 0)
+            close(fds[i]);
+    }
+    return 0;
+}
+
+static int run_child_buffer_vector_add(void)
+{
+    int fd;
+    struct afl_ioctl_alloc_buffer a_buf;
+    struct afl_ioctl_alloc_buffer b_buf;
+    struct afl_ioctl_alloc_buffer out_buf;
+    struct afl_ioctl_vector_add_buffer req;
+    int32_t *a_map;
+    int32_t *b_map;
+    int32_t *out_map;
+    uint32_t bytes = 2u * sizeof(int32_t);
+    int ok;
+
+    fd = open("/dev/afl0", O_RDWR);
+    if (fd < 0)
+        return 10;
+    if (alloc_buffer(fd, bytes, &a_buf) != 0 ||
+        alloc_buffer(fd, bytes, &b_buf) != 0 ||
+        alloc_buffer(fd, bytes, &out_buf) != 0) {
+        close(fd);
+        return 11;
+    }
+
+    a_map = mmap(NULL, a_buf.allocated_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, a_buf.mmap_offset);
+    b_map = mmap(NULL, b_buf.allocated_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, b_buf.mmap_offset);
+    out_map = mmap(NULL, out_buf.allocated_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, out_buf.mmap_offset);
+    if (a_map == MAP_FAILED || b_map == MAP_FAILED || out_map == MAP_FAILED) {
+        close(fd);
+        return 12;
+    }
+
+    a_map[0] = 7;
+    a_map[1] = 8;
+    b_map[0] = 70;
+    b_map[1] = 80;
+    memset(out_map, 0, bytes);
+
+    memset(&req, 0, sizeof(req));
+    req.a_handle = a_buf.handle;
+    req.b_handle = b_buf.handle;
+    req.out_handle = out_buf.handle;
+    req.element_count = 2;
+    req.dtype = AFL_IOCTL_DTYPE_I32;
+    if (ioctl(fd, AFL_IOCTL_VECTOR_ADD_BUFFER, &req) != 0) {
+        close(fd);
+        return 13;
+    }
+
+    ok = out_map[0] == 77 && out_map[1] == 88;
+    close(fd);
+    return ok ? 0 : 14;
+}
+
+static int test_concurrent_buffer_commands(void)
+{
+    pid_t child_a;
+    pid_t child_b;
+    int status_a;
+    int status_b;
+
+    child_a = fork();
+    if (child_a == 0)
+        _exit(run_child_buffer_vector_add());
+    if (child_a < 0) {
+        fail("concurrent buffer command fork A", strerror(errno));
+        return -1;
+    }
+
+    child_b = fork();
+    if (child_b == 0)
+        _exit(run_child_buffer_vector_add());
+    if (child_b < 0) {
+        fail("concurrent buffer command fork B", strerror(errno));
+        waitpid(child_a, &status_a, 0);
+        return -1;
+    }
+
+    if (waitpid(child_a, &status_a, 0) < 0 || waitpid(child_b, &status_b, 0) < 0) {
+        fail("concurrent buffer command wait", strerror(errno));
+        return -1;
+    }
+    if (!WIFEXITED(status_a) || WEXITSTATUS(status_a) != 0 ||
+        !WIFEXITED(status_b) || WEXITSTATUS(status_b) != 0) {
+        fail("concurrent buffer commands use isolated buffers", "one child returned a bad result");
+        return -1;
+    }
+
+    pass("concurrent buffer commands use isolated buffers");
+    return 0;
 }
 
 static int test_async_completion_and_backpressure(int fd)
@@ -350,6 +728,12 @@ int main(void)
 
     test_invalid_pointer(fd);
     test_oversized_dma(fd);
+    test_buffer_vector_add(fd);
+    test_buffer_matrix_mul(fd);
+    test_buffer_allocator_limits(fd);
+    test_buffer_allocations_do_not_overlap_across_fds();
+    test_buffer_release_reclaims_unfreed_buffers();
+    test_concurrent_buffer_commands();
     test_async_completion_and_backpressure(fd);
     test_timeout_recovery(fd);
     test_reset_after_fault(fd);

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include "afl/ioctl.h"
@@ -17,8 +18,10 @@ static void print_usage(const char *argv0)
     fprintf(stderr, "  version\n");
     fprintf(stderr, "  selftest\n");
     fprintf(stderr, "  run-vector-add [a0,a1,... b0,b1,...]\n");
+    fprintf(stderr, "  run-vector-add-buffer [a0,a1,... b0,b1,...]\n");
     fprintf(stderr, "  run-vector-add-async [a0,a1,... b0,b1,...]\n");
     fprintf(stderr, "  run-matrix-mul [m n k a0,a1,... b0,b1,...]\n");
+    fprintf(stderr, "  run-matrix-mul-buffer [m n k a0,a1,... b0,b1,...]\n");
     fprintf(stderr, "  memcopy\n");
     fprintf(stderr, "  telemetry\n");
     fprintf(stderr, "  trigger-fault\n");
@@ -36,6 +39,44 @@ static int kernel_open(void)
         fprintf(stderr, "hint: build and load the kernel module with `make -C kernel` and `sudo insmod kernel/afl_kernel.ko`\n");
     }
     return fd;
+}
+
+static int kernel_alloc_buffer(int fd, uint32_t size, struct afl_ioctl_alloc_buffer *buffer)
+{
+    memset(buffer, 0, sizeof(*buffer));
+    buffer->size = size;
+    if (ioctl(fd, AFL_IOCTL_ALLOC_BUFFER, buffer) != 0) {
+        fprintf(stderr, "AFL_IOCTL_ALLOC_BUFFER failed: %s\n", strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+
+static int kernel_free_buffer(int fd, uint32_t handle)
+{
+    struct afl_ioctl_free_buffer req;
+
+    if (handle == 0)
+        return 0;
+
+    memset(&req, 0, sizeof(req));
+    req.handle = handle;
+    if (ioctl(fd, AFL_IOCTL_FREE_BUFFER, &req) != 0) {
+        fprintf(stderr, "AFL_IOCTL_FREE_BUFFER failed: %s\n", strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+
+static void *kernel_mmap_buffer(int fd, const struct afl_ioctl_alloc_buffer *buffer)
+{
+    void *ptr = mmap(NULL, buffer->allocated_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buffer->mmap_offset);
+
+    if (ptr == MAP_FAILED) {
+        fprintf(stderr, "mmap(buffer handle=%u) failed: %s\n", buffer->handle, strerror(errno));
+        return NULL;
+    }
+    return ptr;
 }
 
 static int kernel_cmd_version(void)
@@ -192,6 +233,70 @@ static int kernel_run_vector_add(int32_t *a, int32_t *b, int32_t *out, uint32_t 
     return 0;
 }
 
+static int kernel_run_vector_add_buffer(int32_t *a, int32_t *b, int32_t *out, uint32_t element_count)
+{
+    struct afl_ioctl_alloc_buffer a_buf;
+    struct afl_ioctl_alloc_buffer b_buf;
+    struct afl_ioctl_alloc_buffer out_buf;
+    struct afl_ioctl_vector_add_buffer req;
+    int32_t *a_map = NULL;
+    int32_t *b_map = NULL;
+    int32_t *out_map = NULL;
+    uint32_t bytes = element_count * (uint32_t)sizeof(int32_t);
+    int fd = kernel_open();
+    int rc = 0;
+
+    if (fd < 0)
+        return 1;
+    memset(&a_buf, 0, sizeof(a_buf));
+    memset(&b_buf, 0, sizeof(b_buf));
+    memset(&out_buf, 0, sizeof(out_buf));
+    if (kernel_alloc_buffer(fd, bytes, &a_buf) != 0 ||
+        kernel_alloc_buffer(fd, bytes, &b_buf) != 0 ||
+        kernel_alloc_buffer(fd, bytes, &out_buf) != 0) {
+        rc = 1;
+        goto out_free;
+    }
+
+    a_map = kernel_mmap_buffer(fd, &a_buf);
+    b_map = kernel_mmap_buffer(fd, &b_buf);
+    out_map = kernel_mmap_buffer(fd, &out_buf);
+    if (a_map == NULL || b_map == NULL || out_map == NULL) {
+        rc = 1;
+        goto out_free;
+    }
+
+    memcpy(a_map, a, bytes);
+    memcpy(b_map, b, bytes);
+    memset(out_map, 0, bytes);
+
+    memset(&req, 0, sizeof(req));
+    req.a_handle = a_buf.handle;
+    req.b_handle = b_buf.handle;
+    req.out_handle = out_buf.handle;
+    req.element_count = element_count;
+    req.dtype = AFL_IOCTL_DTYPE_I32;
+    if (ioctl(fd, AFL_IOCTL_VECTOR_ADD_BUFFER, &req) != 0) {
+        fprintf(stderr, "AFL_IOCTL_VECTOR_ADD_BUFFER failed: %s\n", strerror(errno));
+        rc = 1;
+    } else {
+        memcpy(out, out_map, bytes);
+    }
+
+out_free:
+    if (out_map != NULL)
+        munmap(out_map, out_buf.allocated_size);
+    if (b_map != NULL)
+        munmap(b_map, b_buf.allocated_size);
+    if (a_map != NULL)
+        munmap(a_map, a_buf.allocated_size);
+    kernel_free_buffer(fd, out_buf.handle);
+    kernel_free_buffer(fd, b_buf.handle);
+    kernel_free_buffer(fd, a_buf.handle);
+    close(fd);
+    return rc;
+}
+
 static void print_i32_vector(const char *label, const int32_t *values, uint32_t count)
 {
     uint32_t i;
@@ -263,6 +368,57 @@ static int kernel_cmd_vector_add(int arg_count, char **args)
     rc = kernel_run_vector_add(a, b, out, a_count);
     if (rc == 0)
         print_i32_vector("vector-add i32", out, a_count);
+
+    if (arg_count == 2) {
+        free(out);
+        free(b);
+        free(a);
+    }
+    return rc;
+}
+
+static int kernel_cmd_vector_add_buffer(int arg_count, char **args)
+{
+    int32_t default_a[] = {1, 2, 3, 4};
+    int32_t default_b[] = {10, 20, 30, 40};
+    int32_t default_out[] = {0, 0, 0, 0};
+    int32_t *a = default_a;
+    int32_t *b = default_b;
+    int32_t *out = default_out;
+    uint32_t a_count = 4;
+    uint32_t b_count = 4;
+    int rc;
+
+    if (arg_count != 0 && arg_count != 2) {
+        fprintf(stderr, "usage: fwctl run-vector-add-buffer [a0,a1,... b0,b1,...]\n");
+        return 2;
+    }
+
+    if (arg_count == 2) {
+        rc = parse_i32_vector(args[0], &a, &a_count);
+        if (rc != 0)
+            return 2;
+        rc = parse_i32_vector(args[1], &b, &b_count);
+        if (rc != 0) {
+            free(a);
+            return 2;
+        }
+        if (a_count != b_count) {
+            free(b);
+            free(a);
+            return 2;
+        }
+        out = calloc(a_count, sizeof(*out));
+        if (out == NULL) {
+            free(b);
+            free(a);
+            return 1;
+        }
+    }
+
+    rc = kernel_run_vector_add_buffer(a, b, out, a_count);
+    if (rc == 0)
+        print_i32_vector("vector-add buffer i32", out, a_count);
 
     if (arg_count == 2) {
         free(out);
@@ -418,6 +574,74 @@ static int kernel_run_matrix_mul(int32_t *a, int32_t *b, int32_t *c, uint32_t m,
     return 0;
 }
 
+static int kernel_run_matrix_mul_buffer(int32_t *a, int32_t *b, int32_t *c, uint32_t m, uint32_t n, uint32_t k)
+{
+    struct afl_ioctl_alloc_buffer a_buf;
+    struct afl_ioctl_alloc_buffer b_buf;
+    struct afl_ioctl_alloc_buffer c_buf;
+    struct afl_ioctl_matrix_mul_buffer req;
+    int32_t *a_map = NULL;
+    int32_t *b_map = NULL;
+    int32_t *c_map = NULL;
+    uint32_t a_bytes = m * k * (uint32_t)sizeof(int32_t);
+    uint32_t b_bytes = k * n * (uint32_t)sizeof(int32_t);
+    uint32_t c_bytes = m * n * (uint32_t)sizeof(int32_t);
+    int fd = kernel_open();
+    int rc = 0;
+
+    if (fd < 0)
+        return 1;
+    memset(&a_buf, 0, sizeof(a_buf));
+    memset(&b_buf, 0, sizeof(b_buf));
+    memset(&c_buf, 0, sizeof(c_buf));
+    if (kernel_alloc_buffer(fd, a_bytes, &a_buf) != 0 ||
+        kernel_alloc_buffer(fd, b_bytes, &b_buf) != 0 ||
+        kernel_alloc_buffer(fd, c_bytes, &c_buf) != 0) {
+        rc = 1;
+        goto out_free;
+    }
+
+    a_map = kernel_mmap_buffer(fd, &a_buf);
+    b_map = kernel_mmap_buffer(fd, &b_buf);
+    c_map = kernel_mmap_buffer(fd, &c_buf);
+    if (a_map == NULL || b_map == NULL || c_map == NULL) {
+        rc = 1;
+        goto out_free;
+    }
+
+    memcpy(a_map, a, a_bytes);
+    memcpy(b_map, b, b_bytes);
+    memset(c_map, 0, c_bytes);
+
+    memset(&req, 0, sizeof(req));
+    req.a_handle = a_buf.handle;
+    req.b_handle = b_buf.handle;
+    req.c_handle = c_buf.handle;
+    req.m = m;
+    req.n = n;
+    req.k = k;
+    req.dtype = AFL_IOCTL_DTYPE_I32;
+    if (ioctl(fd, AFL_IOCTL_MATRIX_MUL_BUFFER, &req) != 0) {
+        fprintf(stderr, "AFL_IOCTL_MATRIX_MUL_BUFFER failed: %s\n", strerror(errno));
+        rc = 1;
+    } else {
+        memcpy(c, c_map, c_bytes);
+    }
+
+out_free:
+    if (c_map != NULL)
+        munmap(c_map, c_buf.allocated_size);
+    if (b_map != NULL)
+        munmap(b_map, b_buf.allocated_size);
+    if (a_map != NULL)
+        munmap(a_map, a_buf.allocated_size);
+    kernel_free_buffer(fd, c_buf.handle);
+    kernel_free_buffer(fd, b_buf.handle);
+    kernel_free_buffer(fd, a_buf.handle);
+    close(fd);
+    return rc;
+}
+
 static int kernel_cmd_matrix_mul(int arg_count, char **args)
 {
     int32_t a[] = {
@@ -517,6 +741,71 @@ static int kernel_cmd_matrix_mul(int arg_count, char **args)
     rc = kernel_run_matrix_mul(a_values, b_values, c_values, m, n, k);
     if (rc == 0)
         print_i32_matrix("matrix-mul i32", c_values, m, n);
+
+    if (arg_count == 5) {
+        free(c_values);
+        free(b_values);
+        free(a_values);
+    }
+    return rc;
+}
+
+static int kernel_cmd_matrix_mul_buffer(int arg_count, char **args)
+{
+    int32_t a[] = {1, 2, 3, 4, 5, 6};
+    int32_t b[] = {7, 8, 9, 10, 11, 12};
+    int32_t c[] = {0, 0, 0, 0};
+    int32_t *a_values = a;
+    int32_t *b_values = b;
+    int32_t *c_values = c;
+    uint32_t m = 2;
+    uint32_t n = 2;
+    uint32_t k = 3;
+    uint32_t a_count = 6;
+    uint32_t b_count = 6;
+    uint32_t c_count = 4;
+    uint32_t expected_a_count;
+    uint32_t expected_b_count;
+    uint32_t expected_c_count;
+    int rc;
+
+    if (arg_count != 0 && arg_count != 5) {
+        fprintf(stderr, "usage: fwctl run-matrix-mul-buffer [m n k a0,a1,... b0,b1,...]\n");
+        return 2;
+    }
+
+    if (arg_count == 5) {
+        if (parse_u32_arg(args[0], &m) != 0 || parse_u32_arg(args[1], &n) != 0 || parse_u32_arg(args[2], &k) != 0)
+            return 2;
+        if (checked_matrix_element_count(m, k, &expected_a_count) != 0 ||
+            checked_matrix_element_count(k, n, &expected_b_count) != 0 ||
+            checked_matrix_element_count(m, n, &expected_c_count) != 0)
+            return 2;
+        rc = parse_i32_vector(args[3], &a_values, &a_count);
+        if (rc != 0)
+            return 2;
+        rc = parse_i32_vector(args[4], &b_values, &b_count);
+        if (rc != 0) {
+            free(a_values);
+            return 2;
+        }
+        if (a_count != expected_a_count || b_count != expected_b_count) {
+            free(b_values);
+            free(a_values);
+            return 2;
+        }
+        c_count = expected_c_count;
+        c_values = calloc(c_count, sizeof(*c_values));
+        if (c_values == NULL) {
+            free(b_values);
+            free(a_values);
+            return 1;
+        }
+    }
+
+    rc = kernel_run_matrix_mul_buffer(a_values, b_values, c_values, m, n, k);
+    if (rc == 0)
+        print_i32_matrix("matrix-mul buffer i32", c_values, m, n);
 
     if (arg_count == 5) {
         free(c_values);
@@ -797,8 +1086,10 @@ static int run_kernel_command(const char *command, int arg_count, char **args)
 {
     if (arg_count != 0 &&
         strcmp(command, "run-vector-add") != 0 &&
+        strcmp(command, "run-vector-add-buffer") != 0 &&
         strcmp(command, "run-vector-add-async") != 0 &&
-        strcmp(command, "run-matrix-mul") != 0)
+        strcmp(command, "run-matrix-mul") != 0 &&
+        strcmp(command, "run-matrix-mul-buffer") != 0)
         return 2;
 
     if (strcmp(command, "version") == 0)
@@ -807,10 +1098,14 @@ static int run_kernel_command(const char *command, int arg_count, char **args)
         return kernel_cmd_selftest();
     if (strcmp(command, "run-vector-add") == 0)
         return kernel_cmd_vector_add(arg_count, args);
+    if (strcmp(command, "run-vector-add-buffer") == 0)
+        return kernel_cmd_vector_add_buffer(arg_count, args);
     if (strcmp(command, "run-vector-add-async") == 0)
         return kernel_cmd_vector_add_async(arg_count, args);
     if (strcmp(command, "run-matrix-mul") == 0)
         return kernel_cmd_matrix_mul(arg_count, args);
+    if (strcmp(command, "run-matrix-mul-buffer") == 0)
+        return kernel_cmd_matrix_mul_buffer(arg_count, args);
     if (strcmp(command, "memcopy") == 0)
         return kernel_cmd_memcopy();
     if (strcmp(command, "telemetry") == 0)
