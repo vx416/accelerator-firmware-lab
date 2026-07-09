@@ -223,8 +223,8 @@ The initial async path supports one outstanding vector-add request.
 After ioctl validation, the first driver job is to put command data and workload
 buffers somewhere the device side is allowed to read. Real DMA means the device
 reads and writes host memory directly after the driver maps approved buffers for
-the device. This project does not perform real hardware DMA. It models the
-ownership boundary with driver-owned staging buffers:
+the device. **This project does not perform real hardware DMA. It models the
+ownership boundary with driver-owned staging buffers:**
 
 ```text
 userspace pointer
@@ -263,9 +263,9 @@ After the fake DMA buffers and command descriptor exist, the driver still needs
 a control signal that tells firmware to consume the queue. That is the MMIO
 role: small registers carry control, status, queue indices, and doorbells. In
 real PCIe hardware, MMIO registers normally live in a BAR mapped by the driver
-with `pci_iomap()` or `ioremap()`. This project does not have a real BAR.
+with `pci_iomap()` or `ioremap()`. **This project does not have a real BAR.
 Instead, the virtual device keeps an internal fake register table so the
-control/status contract is still explicit.
+control/status contract is still explicit.**
 
 ```text
 offset  name                    meaning
@@ -300,9 +300,9 @@ After the driver rings the doorbell, the device side needs a way to report
 "work completed" or "work failed" without forcing userspace to blindly poll
 status forever. Real PCIe devices typically use INTx, MSI, or MSI-X interrupts.
 A production driver would allocate IRQ vectors and register handlers with
-`request_irq()`. This project does not request a real hardware IRQ.
+`request_irq()`. **This project does not request a real hardware IRQ.**
 
-Instead, the virtual device models completion notification with:
+**Instead, the virtual device models completion notification with:**
 
 - `irq_pending` reason bits;
 - fake IRQ vector status/mask/enable bits;
